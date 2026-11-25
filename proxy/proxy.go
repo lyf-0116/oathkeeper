@@ -48,6 +48,56 @@ type Proxy struct {
 	d dependencies
 }
 
+var untrustedIdentityHeaderPrefixes = []string{
+	"cf-access-",
+	"impersonate-",
+	"remote-",
+	"x-amzn-oidc-",
+	"x-auth",
+	"x-authenticated-",
+	"x-authentik-",
+	"x-email",
+	"x-forwarded-access-token",
+	"x-forwarded-email",
+	"x-forwarded-group",
+	"x-forwarded-id-token",
+	"x-forwarded-identity",
+	"x-forwarded-name",
+	"x-forwarded-preferred-username",
+	"x-forwarded-role",
+	"x-forwarded-scope",
+	"x-forwarded-subject",
+	"x-forwarded-uid",
+	"x-forwarded-user",
+	"x-goog-authenticated-",
+	"x-goog-iap-",
+	"x-group",
+	"x-identity",
+	"x-impersonate-",
+	"x-jwt",
+	"x-oauth",
+	"x-oidc",
+	"x-original-email",
+	"x-original-group",
+	"x-original-user",
+	"x-pomerium-",
+	"x-proxy-",
+	"x-remote-",
+	"x-role",
+	"x-scope",
+	"x-subject",
+	"x-user",
+	"x-webauth-",
+}
+
+var untrustedIdentityHeaders = map[string]struct{}{
+	"x-access-token": {},
+	"x-id-token":     {},
+	"x-uid":          {},
+	"x-user-info":    {},
+	"x-userinfo":     {},
+}
+
 type key int
 
 const (
@@ -125,6 +175,8 @@ func (p *Proxy) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func (p *Proxy) Rewrite(r *httputil.ProxyRequest) {
+	removeUntrustedIdentityHeaders(r.Out.Header)
+
 	if p.d.Config().ProxyTrustForwardedHeaders() {
 		for _, h := range []string{
 			"X-Forwarded-Host",
@@ -171,6 +223,23 @@ func (p *Proxy) Rewrite(r *httputil.ProxyRequest) {
 
 	var en error // need to set it to error but with nil value
 	*r.Out = *r.Out.WithContext(context.WithValue(r.Out.Context(), director, en))
+}
+
+func removeUntrustedIdentityHeaders(headers http.Header) {
+	for h := range headers {
+		lh := strings.ReplaceAll(strings.ToLower(h), "_", "-")
+		if _, ok := untrustedIdentityHeaders[lh]; ok {
+			delete(headers, h)
+			continue
+		}
+
+		for _, prefix := range untrustedIdentityHeaderPrefixes {
+			if strings.HasPrefix(lh, prefix) {
+				delete(headers, h)
+				break
+			}
+		}
+	}
 }
 
 func CopyHeaders(headers http.Header, r *http.Request) {

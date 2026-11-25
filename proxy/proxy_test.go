@@ -210,6 +210,7 @@ func TestProxy(t *testing.T) {
 			},
 			transform: func(r *http.Request) {
 				r.Header.Set("X-Forwarded-Host", "foobar.com")
+				r.Header.Set("X-Forwarded-User", "attacker")
 			},
 			url: ts.URL + "/authn-anon/authz-allow/cred-noop/1234",
 			rulesRegexp: []rule.Rule{{
@@ -232,6 +233,9 @@ func TestProxy(t *testing.T) {
 				"url=/authn-anon/authz-allow/cred-noop/1234",
 				"host=" + x.ParseURLOrPanic(backend.URL).Host,
 				"header X-Forwarded-Host=foobar.com",
+			},
+			messagesNot: []string{
+				"header X-Forwarded-User=attacker",
 			},
 		},
 		{
@@ -257,6 +261,80 @@ func TestProxy(t *testing.T) {
 			code: http.StatusOK,
 			messagesNot: []string{
 				"header X-Forwarded-Host=foobar.com",
+			},
+		},
+		{
+			d: "should remove client-supplied identity headers",
+			transform: func(r *http.Request) {
+				r.Header.Set("X-User", "attacker")
+				r.Header.Set("X-Email", "attacker@example.com")
+				r.Header.Set("X-Groups", "admins")
+				r.Header.Set("X-Auth-Request-User", "attacker")
+				r.Header.Set("Remote-Groups", "admins")
+				r.Header.Set("X-Forwarded-User", "attacker")
+				r.Header["X_User"] = []string{"attacker"}
+				r.Header["X_Forwarded_Role"] = []string{"admins"}
+				r.Header.Set("X-Custom-Header", "keep-me")
+			},
+			url: ts.URL + "/authn-anon/authz-allow/cred-noop/1234",
+			rulesRegexp: []rule.Rule{{
+				Match:          &rule.Match{Methods: []string{"GET"}, URL: ts.URL + "/authn-anon/authz-allow/cred-noop/<[0-9]+>"},
+				Authenticators: []rule.Handler{{Handler: "anonymous"}},
+				Authorizer:     rule.Handler{Handler: "allow"},
+				Mutators:       []rule.Handler{{Handler: "noop"}},
+				Upstream:       rule.Upstream{URL: backend.URL},
+			}},
+			rulesGlob: []rule.Rule{{
+				Match:          &rule.Match{Methods: []string{"GET"}, URL: ts.URL + "/authn-anon/authz-allow/cred-noop/<[0-9]*>"},
+				Authenticators: []rule.Handler{{Handler: "anonymous"}},
+				Authorizer:     rule.Handler{Handler: "allow"},
+				Mutators:       []rule.Handler{{Handler: "noop"}},
+				Upstream:       rule.Upstream{URL: backend.URL},
+			}},
+			code: http.StatusOK,
+			messages: []string{
+				"header X-Custom-Header=keep-me",
+			},
+			messagesNot: []string{
+				"header X-User=attacker",
+				"header X-Email=attacker@example.com",
+				"header X-Groups=admins",
+				"header X-Auth-Request-User=attacker",
+				"header Remote-Groups=admins",
+				"header X-Forwarded-User=attacker",
+				"header X_User=attacker",
+				"header X_Forwarded_Role=admins",
+			},
+		},
+		{
+			d: "should keep identity headers set by the mutator",
+			transform: func(r *http.Request) {
+				r.Header.Set("X-User", "attacker")
+				r.Header.Set("X-Email", "attacker@example.com")
+			},
+			url: ts.URL + "/authn-anon/authz-allow/cred-noop/1234",
+			rulesRegexp: []rule.Rule{{
+				Match:          &rule.Match{Methods: []string{"GET"}, URL: ts.URL + "/authn-anon/authz-allow/cred-noop/<[0-9]+>"},
+				Authenticators: []rule.Handler{{Handler: "anonymous"}},
+				Authorizer:     rule.Handler{Handler: "allow"},
+				Mutators:       []rule.Handler{{Handler: "header", Config: json.RawMessage(`{"headers":{"X-User":"{{ print .Subject }}","X-Email":"{{ print .Subject }}@example.com"}}`)}},
+				Upstream:       rule.Upstream{URL: backend.URL},
+			}},
+			rulesGlob: []rule.Rule{{
+				Match:          &rule.Match{Methods: []string{"GET"}, URL: ts.URL + "/authn-anon/authz-allow/cred-noop/<[0-9]*>"},
+				Authenticators: []rule.Handler{{Handler: "anonymous"}},
+				Authorizer:     rule.Handler{Handler: "allow"},
+				Mutators:       []rule.Handler{{Handler: "header", Config: json.RawMessage(`{"headers":{"X-User":"{{ print .Subject }}","X-Email":"{{ print .Subject }}@example.com"}}`)}},
+				Upstream:       rule.Upstream{URL: backend.URL},
+			}},
+			code: http.StatusOK,
+			messages: []string{
+				"header X-User=anonymous",
+				"header X-Email=anonymous@example.com",
+			},
+			messagesNot: []string{
+				"header X-User=attacker",
+				"header X-Email=attacker@example.com",
 			},
 		},
 		{
