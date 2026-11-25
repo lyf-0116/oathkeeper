@@ -61,12 +61,48 @@ func TestCache(t *testing.T) {
 	})
 
 	t.Run("case=cached invalid json", func(t *testing.T) {
-		ok := a.TokenCache.Set(authn.TokenCacheKey("invalid-json", config.IntrospectionURL), []byte("invalid-json-string"), 1)
+		ok := a.TokenCache.Set(authn.TokenCacheKey("invalid-json", config.IntrospectionURL, nil), []byte("invalid-json-string"), 1)
 		require.True(t, ok)
 		a.WaitForCache()
 
 		v := a.TokenFromCache(config, "invalid-json", fosite.WildcardScopeStrategy)
 		require.Nil(t, v)
+	})
+
+	t.Run("case=cache key does not contain the raw token", func(t *testing.T) {
+		key := authn.TokenCacheKey("sensitive-token", config.IntrospectionURL, []byte("secret"))
+		assert.NotContains(t, key, "sensitive-token")
+		assert.NotContains(t, key, config.IntrospectionURL)
+
+		// the secret must influence the key
+		assert.NotEqual(t, key, authn.TokenCacheKey("sensitive-token", config.IntrospectionURL, []byte("other-secret")))
+
+		// token and endpoint are separated unambiguously
+		assert.NotEqual(t,
+			authn.TokenCacheKey("a", "b|c", []byte("secret")),
+			authn.TokenCacheKey("a|b", "c", []byte("secret")),
+		)
+	})
+
+	t.Run("case=dual-read of legacy plaintext keys", func(t *testing.T) {
+		i := &authn.AuthenticatorOAuth2IntrospectionResult{Active: true}
+
+		// an entry written by an old instance under the legacy plaintext key
+		ok := a.TokenCache.Set(authn.LegacyTokenCacheKey("legacy-token", config.IntrospectionURL), []byte(`{"active":true}`), 1)
+		require.True(t, ok)
+		a.WaitForCache()
+
+		v := a.TokenFromCache(config, "legacy-token", fosite.WildcardScopeStrategy)
+		require.NotNil(t, v)
+		assert.True(t, v.Active)
+
+		// new entries are only written under the digest key
+		a.TokenToCache(config, i, "fresh-token", fosite.WildcardScopeStrategy)
+		a.WaitForCache()
+		_, found := a.TokenCache.Get(authn.LegacyTokenCacheKey("fresh-token", config.IntrospectionURL))
+		assert.False(t, found)
+		_, found = a.TokenCache.Get(authn.TokenCacheKey("fresh-token", config.IntrospectionURL, nil))
+		assert.True(t, found)
 	})
 
 	t.Run("case=cache with ttl", func(t *testing.T) {

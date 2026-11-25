@@ -907,6 +907,11 @@
               "default": 100000000,
               "title": "Max Cost",
               "description": "Max cost to cache."
+            },
+            "key_secret": {
+              "type": "string",
+              "title": "Cache Key Secret",
+              "description": "Secret used to key the digest of cache keys, so that raw tokens never appear in cache keys. Rotate it like a credential; rotating it invalidates all existing cache entries. If empty, an unkeyed digest is used."
             }
           }
         }

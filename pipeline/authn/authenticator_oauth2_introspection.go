@@ -5,7 +5,9 @@ package authn
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/md5" //nolint:gosec
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -59,9 +61,10 @@ type AuthenticatorOAuth2IntrospectionRetryConfiguration struct {
 }
 
 type cacheConfig struct {
-	Enabled bool   `json:"enabled"`
-	TTL     string `json:"ttl"`
-	MaxCost int    `json:"max_cost"`
+	Enabled   bool   `json:"enabled"`
+	TTL       string `json:"ttl"`
+	MaxCost   int    `json:"max_cost"`
+	KeySecret string `json:"key_secret"`
 }
 
 type AuthenticatorOAuth2Introspection struct {
@@ -131,7 +134,27 @@ func (a *Audience) UnmarshalJSON(b []byte) error {
 	return errUnsupportedType
 }
 
-func TokenCacheKey(token, endpoint string) string {
+// TokenCacheKey returns the cache key for a token introspection result. The
+// key is a keyed digest (HMAC-SHA256) of the token and the introspection
+// endpoint, so the raw token never appears in cache keys, key scans, slow
+// query logs, or backups. The secret should be configured via
+// `cache.key_secret` and rotated like any other credential; rotating it
+// invalidates all existing cache entries.
+func TokenCacheKey(token, endpoint string, secret []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	// The 0-byte separator keeps token and endpoint unambiguous even if one
+	// of them contains the separator itself.
+	mac.Write([]byte(token))
+	mac.Write([]byte{0})
+	mac.Write([]byte(endpoint))
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
+// LegacyTokenCacheKey is the cache key format used before keys were digests.
+// It embeds the raw token and is only kept to read entries written by older
+// instances during rolling upgrades. Entries under this key expire with
+// their TTL; new entries are never written under it.
+func LegacyTokenCacheKey(token, endpoint string) string {
 	return fmt.Sprintf("%s|%s", token, endpoint)
 }
 
@@ -144,10 +167,16 @@ func (a *AuthenticatorOAuth2Introspection) TokenFromCache(config *AuthenticatorO
 		return nil
 	}
 
-	key := TokenCacheKey(token, config.IntrospectionURL)
+	key := TokenCacheKey(token, config.IntrospectionURL, []byte(config.Cache.KeySecret))
 	i, found := a.TokenCache.Get(key)
 	if !found {
-		return nil
+		// Dual-read period: fall back to the legacy plaintext key so entries
+		// written by not-yet-upgraded instances remain usable during rolling
+		// upgrades. Legacy entries expire with their TTL.
+		i, found = a.TokenCache.Get(LegacyTokenCacheKey(token, config.IntrospectionURL))
+		if !found {
+			return nil
+		}
 	}
 
 	var v AuthenticatorOAuth2IntrospectionResult
@@ -166,7 +195,7 @@ func (a *AuthenticatorOAuth2Introspection) TokenToCache(config *AuthenticatorOAu
 		return
 	}
 
-	key := TokenCacheKey(token, config.IntrospectionURL)
+	key := TokenCacheKey(token, config.IntrospectionURL, []byte(config.Cache.KeySecret))
 	v, err := json.Marshal(i)
 	if err != nil {
 		return
@@ -386,6 +415,9 @@ func (a *AuthenticatorOAuth2Introspection) Config(config json.RawMessage) (*Auth
 	}
 
 	if a.TokenCache == nil {
+		if c.Cache.Enabled && c.Cache.KeySecret == "" {
+			a.d.Logger().Warn("The oauth2_introspection cache is enabled without cache.key_secret. Cache keys fall back to an unkeyed digest; set a secret and rotate it like a credential.")
+		}
 		cost := int64(c.Cache.MaxCost)
 		if cost == 0 {
 			cost = 100000000
